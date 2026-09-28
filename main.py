@@ -5,7 +5,7 @@ User uploads a video file directly (already downloaded from YouTube/Kick/whereve
 This service:
   1. Saves the uploaded file
   2. Extracts audio and transcribes it with timestamps (faster-whisper)
-  3. Sends the transcript to Claude to find the best 30-40s highlight moments
+  3. Sends the transcript to Gemini (free tier) to find the best 30-40s highlight moments
   4. Cuts those moments out of the video with ffmpeg
   5. Returns downloadable clip files
 
@@ -13,7 +13,7 @@ No yt-dlp, no link-downloading, no platform scraping — much simpler and more s
 
 Run:
   pip install -r requirements.txt
-  export ANTHROPIC_API_KEY=sk-...
+  export GEMINI_API_KEY=...
   uvicorn main:app --host 0.0.0.0 --port 8000
 """
 
@@ -30,7 +30,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from faster_whisper import WhisperModel
-import anthropic
+import requests
 
 # ---------- setup ----------
 
@@ -50,9 +50,10 @@ app.add_middleware(
 app.mount("/clips", StaticFiles(directory=str(CLIPS_DIR)), name="clips")
 
 # Loaded once, reused across requests. "small" is fast; use "medium"/"large-v3" for better accuracy.
-whisper_model = WhisperModel("small", device="cpu", compute_type="int8")
+whisper_model = WhisperModel("tiny", device="cpu", compute_type="int8")
 
-claude = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY from env
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = "gemini-2.5-flash"
 
 
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024  # 2 GB, adjust to your server's disk/bandwidth
@@ -118,12 +119,20 @@ Respond ONLY with a JSON array, no markdown fences, no prose, like:
 [{{"start_seconds": 45, "end_seconds": 82, "title": "short punchy hook title", "reason": "why this is clip-worthy in one sentence"}}]
 Clips should be 25-45 seconds long. Order best first."""
 
-    resp = claude.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=1500,
-        messages=[{"role": "user", "content": prompt}],
+    if not GEMINI_API_KEY:
+        raise RuntimeError("GEMINI_API_KEY is not set on the server.")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+    resp = requests.post(
+        url,
+        headers={"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"},
+        json={
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"responseMimeType": "application/json"},
+        },
+        timeout=120,
     )
-    text = resp.content[0].text.strip()
+    resp.raise_for_status()
+    text = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
     text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     return json.loads(text)
 

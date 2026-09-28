@@ -1,5 +1,5 @@
 fastapi
 uvicorn[standard]
 faster-whisper
-anthropic
+requests
 python-multipart
